@@ -47,6 +47,7 @@ fn init() {
 
 /// Determines the SSL method supported
 #[deriving(Show, Hash, PartialEq, Eq)]
+#[allow(non_camel_case_types)]
 pub enum SslMethod {
     #[cfg(sslv2)]
     /// Only support the SSLv2 protocol
@@ -57,6 +58,8 @@ pub enum SslMethod {
     Tlsv1,
     /// Support the SSLv2, SSLv3 and TLSv1 protocols
     Sslv23,
+    Tlsv1_1,
+    Tlsv1_2,
 }
 
 impl SslMethod {
@@ -66,7 +69,9 @@ impl SslMethod {
             Sslv2 => ffi::SSLv2_method(),
             Sslv3 => ffi::SSLv3_method(),
             Tlsv1 => ffi::TLSv1_method(),
-            Sslv23 => ffi::SSLv23_method()
+            Sslv23 => ffi::SSLv23_method(),
+            Tlsv1_1 => ffi::TLSv1_1_method(),
+            Tlsv1_2 => ffi::TLSv1_2_method()
         }
     }
 }
