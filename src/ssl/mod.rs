@@ -6,10 +6,13 @@ use std::rt::mutex::NativeMutex;
 use std::string;
 use sync::one::{Once, ONCE_INIT};
 
+
+
 use ssl::error::{SslError, SslSessionClosed, StreamError};
 
 pub mod error;
 mod ffi;
+
 #[cfg(test)]
 mod tests;
 
@@ -120,6 +123,13 @@ extern fn raw_verify(preverify_ok: c_int, x509_ctx: *mut ffi::X509_STORE_CTX)
 pub type VerifyCallback = fn(preverify_ok: bool,
                              x509_ctx: &X509StoreContext) -> bool;
 
+#[repr(i32)]
+pub enum X509FileType {
+    PEM = ffi::X509_FILETYPE_PEM,
+    ASN1 = ffi::X509_FILETYPE_ASN1,
+    Default = ffi::X509_FILETYPE_DEFAULT
+}
+
 /// An SSL context object
 pub struct SslContext {
     ctx: *mut ffi::SSL_CTX
@@ -169,6 +179,38 @@ impl SslContext {
             None
         }
     }
+
+    /// Specifies the file that is client certificate
+    pub fn set_certificate_file(&mut self, file: &str, file_type: X509FileType) 
+    -> Option<SslError> {
+        let ret = file.with_c_str(|file| {
+            unsafe {
+                ffi::SSL_CTX_use_certificate_file(self.ctx, file, file_type as c_int)
+            }
+        });
+
+        if ret == 0 {
+            Some(SslError::get())
+        } else {
+            None
+        }
+    }
+
+    /// Specifies the file that is client certificate
+    pub fn set_private_key_file(&mut self, file: &str, file_type: X509FileType) 
+    -> Option<SslError> {
+        let ret = file.with_c_str(|file| {
+            unsafe {
+                ffi::SSL_CTX_use_PrivateKey_file(self.ctx, file, file_type as c_int)
+            }
+        });
+
+        if ret == 0 {
+            Some(SslError::get())
+        } else {
+            None
+        }
+    }    
 }
 
 pub struct X509StoreContext {
