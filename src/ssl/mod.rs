@@ -5,6 +5,7 @@ use std::ptr;
 use std::rt::mutex::NativeMutex;
 use std::string;
 use std::vec::raw;
+use sync::Arc;
 use sync::one::{Once, ONCE_INIT};
 
 use ssl::error::{SslError, SslSessionClosed, StreamError};
@@ -43,6 +44,9 @@ fn init() {
             MUTEXES = mem::transmute(mutexes);
 
             ffi::CRYPTO_set_locking_callback(locking_function);
+
+            ffi::SSL_load_error_strings();
+            ffi::ERR_load_crypto_strings();
         });
     }
 }
@@ -430,7 +434,14 @@ impl Ssl {
             Ok(())
         }
     }
+}
 
+impl Clone for Ssl {
+    fn clone(&self) -> Ssl {
+        Ssl {
+            ssl: self.ssl
+        }
+    }
 }
 
 #[deriving(FromPrimitive)]
@@ -501,12 +512,16 @@ impl MemBio {
     }
 }
 
+// Maximum TLS record size is 16k
+static DEFAULT_STREAM_BUF_SIZE: uint = 16 * 1024;
+
 /// A stream wrapper which handles SSL encryption for an underlying stream.
 pub struct SslStream<S> {
     stream: S,
-    ssl: Ssl,
-    buf: Vec<u8>,
     ctx: Option<X509StoreContext>,
+    ssl: Arc<Ssl>,
+    read_buf: Vec<u8>,
+    write_buf: Vec<u8>,
 }
 
 impl<S: Stream> SslStream<S> {
@@ -514,10 +529,10 @@ impl<S: Stream> SslStream<S> {
     pub fn new_from(ssl: Ssl, stream: S) -> Result<SslStream<S>, SslError> {
         let mut ssl = SslStream {
             stream: stream,
-            ssl: ssl,
-            // Maximum TLS record size is 16k
-            buf: Vec::from_elem(16 * 1024, 0u8),
             ctx: None
+            ssl: Arc::new(ssl),
+            read_buf: Vec::from_elem(DEFAULT_STREAM_BUF_SIZE, 0u8),
+            write_buf: Vec::from_elem(DEFAULT_STREAM_BUF_SIZE, 0u8),
         };
 
         match ssl.in_retry_wrapper(|ssl| { ssl.connect() }) {
@@ -555,7 +570,7 @@ impl<S: Stream> SslStream<S> {
     fn in_retry_wrapper(&mut self, blk: |&Ssl| -> c_int)
             -> Result<c_int, SslError> {
         loop {
-            let ret = blk(&self.ssl);
+            let ret = blk(&*self.ssl);
             if ret > 0 {
                 return Ok(ret);
             }
@@ -563,8 +578,8 @@ impl<S: Stream> SslStream<S> {
             match self.ssl.get_error(ret) {
                 ErrorWantRead => {
                     try_ssl!(self.flush());
-                    let len = try_ssl!(self.stream.read(self.buf.as_mut_slice()));
-                    self.ssl.get_rbio().write(self.buf.slice_to(len));
+                    let len = try_ssl!(self.stream.read(self.read_buf.as_mut_slice()));
+                    self.ssl.get_rbio().write(self.read_buf.slice_to(len));
                 }
                 ErrorWantWrite => { try_ssl!(self.flush()) }
                 ErrorZeroReturn => return Err(SslSessionClosed),
@@ -576,8 +591,8 @@ impl<S: Stream> SslStream<S> {
 
     fn write_through(&mut self) -> IoResult<()> {
         loop {
-            match self.ssl.get_wbio().read(self.buf.as_mut_slice()) {
-                Some(len) => try!(self.stream.write(self.buf.slice_to(len))),
+            match self.ssl.get_wbio().read(self.write_buf.as_mut_slice()) {
+                Some(len) => try!(self.stream.write(self.write_buf.slice_to(len))),
                 None => break
             };
         }
@@ -611,7 +626,15 @@ impl<S: Stream> Reader for SslStream<S> {
                     detail: None
                 }),
             Err(StreamError(e)) => Err(e),
-            _ => unreachable!()
+            Err(OpenSslErrors(errs)) => {
+                println!("Unexpected error!");
+                for e in errs.iter() {
+                    match e {
+                        &UnknownError{reason, library, function, ref reason_str} => println!("Error with reason: {}", reason_str),
+                    }
+                }
+                unreachable!()
+            }
         }
     }
 }
@@ -635,5 +658,19 @@ impl<S: Stream> Writer for SslStream<S> {
     fn flush(&mut self) -> IoResult<()> {
         try!(self.write_through());
         self.stream.flush()
+    }
+}
+
+impl<S: Stream + Clone> Clone for SslStream<S> {
+    fn clone(&self) -> SslStream<S> {
+        // No need to connect as original SslStream
+        // was already connected. It's a bit fragile
+        SslStream {
+            stream: self.stream.clone(),
+            ssl: self.ssl.clone(),
+            // Maximum TLS record size is 16k
+            read_buf: Vec::from_elem(DEFAULT_STREAM_BUF_SIZE, 0u8),
+            write_buf: Vec::from_elem(DEFAULT_STREAM_BUF_SIZE, 0u8)
+        }
     }
 }

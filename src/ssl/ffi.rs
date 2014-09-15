@@ -161,6 +161,7 @@ extern "C" {
 
     pub fn SSL_new(ctx: *mut SSL_CTX) -> *mut SSL;
     pub fn SSL_free(ssl: *mut SSL);
+    pub fn SSL_dup(ssl: *mut SSL) -> *mut SSL;
     pub fn SSL_set_bio(ssl: *mut SSL, rbio: *mut BIO, wbio: *mut BIO);
     pub fn SSL_get_rbio(ssl: *mut SSL) -> *mut BIO;
     pub fn SSL_get_wbio(ssl: *mut SSL) -> *mut BIO;
@@ -182,6 +183,10 @@ extern "C" {
     pub fn BIO_write(b: *mut BIO, buf: *const c_void, len: c_int) -> c_int;
 
     pub fn SSL_COMP_get_name(comp: *const COMP_METHOD) -> *const c_char;
+
+    pub fn SSL_load_error_strings();
+    pub fn ERR_load_crypto_strings();
+    pub fn ERR_reason_error_string(error: c_ulong) -> *const c_char;
 }
 
 #[cfg(target_os = "win32")]
