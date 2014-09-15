@@ -2,6 +2,8 @@ use libc::c_ulong;
 use std::io::IoError;
 
 use ssl::ffi;
+use std::mem;
+use std::string::raw::{from_buf};
 
 /// An SSL error
 #[deriving(Show, Clone, PartialEq, Eq)]
@@ -20,11 +22,12 @@ pub enum OpensslError {
     /// An unknown error
     UnknownError {
         /// The library reporting the error
-        library: u8,
+        pub library: u8,
         /// The function reporting the error
-        function: u16,
+        pub function: u16,
         /// The reason for the error
-        reason: u16
+        pub reason: u16,
+        pub reason_str: String,
     }
 }
 
@@ -51,7 +54,10 @@ impl SslError {
                 err => errs.push(UnknownError {
                     library: get_lib(err),
                     function: get_func(err),
-                    reason: get_reason(err)
+                    reason: get_reason(err),
+                    reason_str: unsafe {
+                        from_buf(mem::transmute(ffi::ERR_reason_error_string(err)))
+                    }
                 })
             }
         }
