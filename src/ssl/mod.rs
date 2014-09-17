@@ -1,12 +1,14 @@
-use libc::{c_int, c_void, c_char};
+use libc::{c_int, c_void, c_char, c_uint};
 use std::io::{IoResult, IoError, EndOfFile, Stream, Reader, Writer};
 use std::mem;
 use std::ptr;
 use std::rt::mutex::NativeMutex;
 use std::string;
+use std::vec::raw;
 use sync::one::{Once, ONCE_INIT};
 
 use ssl::error::{SslError, SslSessionClosed, StreamError};
+use crypto::hash::{HashType, evpmd};
 
 pub mod error;
 mod ffi;
@@ -229,6 +231,20 @@ impl<'ctx> X509<'ctx> {
     pub fn subject_name<'a>(&'a self) -> X509Name<'a> {
         let name = unsafe { ffi::X509_get_subject_name(self.x509) };
         X509Name { x509: self, name: name }
+    }
+
+    pub fn digest(&self, digest: HashType) -> Option<Vec<u8>> {
+        unsafe {
+        let (evp, len) = evpmd(digest);
+        let buf: *mut c_char = ptr::mut_null();
+        let buf_ptr: *mut c_char = mem::transmute(&buf);
+        let act_len: c_uint = 0;
+        let err = ffi::X509_digest(self.x509, evp, buf_ptr, mem::transmute(&act_len));
+        match err {
+            0 => None,
+            _ => Some(raw::from_buf(mem::transmute(buf), act_len as uint))
+        }
+        }
     }
 }
 
@@ -484,7 +500,8 @@ impl MemBio {
 pub struct SslStream<S> {
     stream: S,
     ssl: Ssl,
-    buf: Vec<u8>
+    buf: Vec<u8>,
+    ctx: Option<X509StoreContext>,
 }
 
 impl<S: Stream> SslStream<S> {
@@ -494,7 +511,8 @@ impl<S: Stream> SslStream<S> {
             stream: stream,
             ssl: ssl,
             // Maximum TLS record size is 16k
-            buf: Vec::from_elem(16 * 1024, 0u8)
+            buf: Vec::from_elem(16 * 1024, 0u8),
+            ctx: None
         };
 
         match ssl.in_retry_wrapper(|ssl| { ssl.connect() }) {
@@ -511,6 +529,22 @@ impl<S: Stream> SslStream<S> {
         };
 
         SslStream::new_from(ssl, stream)
+    }
+
+    fn get_peer_certificate(&mut self) -> Result<X509, SslError> {
+        let res = unsafe { ffi::SSL_get_peer_certificate(self.ssl.ssl) };
+        let ctx = X509StoreContext {
+            ctx: ptr::mut_null()
+        };
+        self.ctx = Some(ctx);
+        if res != ptr::mut_null() {
+            Ok(X509 {
+                ctx: self.ctx.as_ref().unwrap(),
+                x509: res,
+            })
+        } else {
+            Err(SslError::get())
+        }
     }
 
     fn in_retry_wrapper(&mut self, blk: |&Ssl| -> c_int)
