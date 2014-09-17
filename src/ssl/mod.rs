@@ -242,17 +242,24 @@ impl<'ctx> X509<'ctx> {
         X509Name { x509: self, name: name }
     }
 
-    pub fn digest(&self, digest: HashType) -> Option<Vec<u8>> {
-        unsafe {
-        let (evp, len) = evpmd(digest);
-        let buf: *mut c_char = ptr::mut_null();
-        let buf_ptr: *mut c_char = mem::transmute(&buf);
+    pub fn fingerprint(&self, hash_type: HashType) -> Option<Vec<u8>> {
+        let (evp, len) = evpmd(hash_type);
+        let v: Vec<u8> = Vec::from_elem(len, 0);
+        let buf_ptr: *mut c_char = unsafe { mem::transmute(v.as_ptr()) };
         let act_len: c_uint = 0;
-        let err = ffi::X509_digest(self.x509, evp, buf_ptr, mem::transmute(&act_len));
+        let err =  unsafe { 
+            ffi::X509_digest(self.x509, evp, buf_ptr, mem::transmute(&act_len))
+        };
+
         match err {
             0 => None,
-            _ => Some(raw::from_buf(mem::transmute(buf), act_len as uint))
-        }
+            _ => {
+                if len == (act_len as uint) {
+                    Some(v) 
+                } else { 
+                    fail!("Memory might be screwed by fingerprint") 
+                }
+            }
         }
     }
 }
@@ -529,7 +536,7 @@ impl<S: Stream> SslStream<S> {
     pub fn new_from(ssl: Ssl, stream: S) -> Result<SslStream<S>, SslError> {
         let mut ssl = SslStream {
             stream: stream,
-            ctx: None
+            ctx: None,
             ssl: Arc::new(ssl),
             read_buf: Vec::from_elem(DEFAULT_STREAM_BUF_SIZE, 0u8),
             write_buf: Vec::from_elem(DEFAULT_STREAM_BUF_SIZE, 0u8),
@@ -551,7 +558,7 @@ impl<S: Stream> SslStream<S> {
         SslStream::new_from(ssl, stream)
     }
 
-    fn get_peer_certificate(&mut self) -> Result<X509, SslError> {
+    pub fn get_peer_certificate(&mut self) -> Result<X509, SslError> {
         let res = unsafe { ffi::SSL_get_peer_certificate(self.ssl.ssl) };
         let ctx = X509StoreContext {
             ctx: ptr::mut_null()
@@ -626,15 +633,7 @@ impl<S: Stream> Reader for SslStream<S> {
                     detail: None
                 }),
             Err(StreamError(e)) => Err(e),
-            Err(OpenSslErrors(errs)) => {
-                println!("Unexpected error!");
-                for e in errs.iter() {
-                    match e {
-                        &UnknownError{reason, library, function, ref reason_str} => println!("Error with reason: {}", reason_str),
-                    }
-                }
-                unreachable!()
-            }
+            _ => unreachable!()
         }
     }
 }
@@ -668,6 +667,7 @@ impl<S: Stream + Clone> Clone for SslStream<S> {
         SslStream {
             stream: self.stream.clone(),
             ssl: self.ssl.clone(),
+            ctx: None,
             // Maximum TLS record size is 16k
             read_buf: Vec::from_elem(DEFAULT_STREAM_BUF_SIZE, 0u8),
             write_buf: Vec::from_elem(DEFAULT_STREAM_BUF_SIZE, 0u8)
