@@ -13,6 +13,7 @@ pub type X509_STORE_CTX = c_void;
 pub type X509 = c_void;
 pub type X509_NAME = c_void;
 pub type CRYPTO_EX_DATA = c_void;
+pub type CRYPTO_THREADID = c_void;
 
 pub type CRYPTO_EX_new = extern "C" fn(parent: *mut c_void, ptr: *mut c_void,
                                        ad: *const CRYPTO_EX_DATA, idx: c_int,
@@ -120,6 +121,10 @@ extern "C" {
                                                            n: c_int,
                                                            file: *const c_char,
                                                            line: c_int));
+
+    pub fn CRYPTO_THREADID_set_callback(callback: extern "C" fn(_: *mut CRYPTO_THREADID)) -> c_int;
+    pub fn CRYPTO_THREADID_set_numeric(id: *mut CRYPTO_THREADID, val: c_ulong);
+    pub fn CRYPTO_THREADID_set_pointer(id: *mut CRYPTO_THREADID, val: *mut c_void);
 
     pub fn ERR_get_error() -> c_ulong;
 

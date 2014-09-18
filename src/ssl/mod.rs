@@ -45,6 +45,27 @@ fn init() {
 
             ffi::CRYPTO_set_locking_callback(locking_function);
 
+            #[cfg(target_os="macos")]            
+            fn init_threadid_callback() {
+                use libc::c_ulong;
+
+                extern "C" { 
+                    fn pthread_self() -> c_ulong;
+                };
+
+                extern "C" fn threadid_callback(id: *mut ffi::CRYPTO_THREADID) {
+                    unsafe { ffi::CRYPTO_THREADID_set_numeric(id, pthread_self()) };
+                };
+
+                unsafe { ffi::CRYPTO_THREADID_set_callback(threadid_callback) };
+            }
+            #[cfg(not(target_os="macos"))]
+            fn init_threadid_callback() {
+
+            }
+
+            init_threadid_callback();
+
             ffi::SSL_load_error_strings();
             ffi::ERR_load_crypto_strings();
         });
