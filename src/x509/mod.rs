@@ -271,6 +271,20 @@ pub struct X509<'ctx> {
 }
 
 impl<'ctx> X509<'ctx> {
+    pub fn new_in_ctx(x: *mut ffi::X509, ctx: &'ctx X509StoreContext) -> X509<'ctx> {
+        X509 {
+            x509: x,
+            ctx: Some(ctx)
+        }
+    }
+
+    pub fn new(x: *mut ffi::X509) -> X509<'ctx> {
+        X509 {
+            x509: x,
+            ctx: None
+        }
+    }
+
     pub fn subject_name<'a>(&'a self) -> X509Name<'a> {
         let name = unsafe { ffi::X509_get_subject_name(self.x509) };
         X509Name { x509: self, name: name }

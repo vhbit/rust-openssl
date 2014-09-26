@@ -404,6 +404,16 @@ impl<S: Stream> SslStream<S> {
 
         Some(s)
     }
+
+    /// Get current peer certificate
+    pub fn get_peer_certificate(&mut self) -> Result<x509::X509, SslError> {
+        let res = unsafe { ffi::SSL_get_peer_certificate(self.ssl.ssl) };
+        if res != ptr::mut_null() {
+            Ok(x509::X509::new(res))
+        } else {
+            Err(SslError::get())
+        }
+    }
 }
 
 impl<S: Stream> Reader for SslStream<S> {
