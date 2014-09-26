@@ -7,8 +7,7 @@ pub type EVP_CIPHER_CTX = *mut libc::c_void;
 #[allow(non_camel_case_types)]
 pub type EVP_CIPHER = *mut libc::c_void;
 
-#[link(name = "crypto")]
-extern {
+extern "C" {
     fn EVP_CIPHER_CTX_new() -> EVP_CIPHER_CTX;
     fn EVP_CIPHER_CTX_set_padding(ctx: EVP_CIPHER_CTX, padding: c_int);
     fn EVP_CIPHER_CTX_free(ctx: EVP_CIPHER_CTX);

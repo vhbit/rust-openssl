@@ -1,7 +1,6 @@
 use libc::c_int;
 
-#[link(name = "crypto")]
-extern {
+extern "C" {
     fn RAND_bytes(buf: *mut u8, num: c_int) -> c_int;
 }
 

@@ -15,8 +15,7 @@ pub type RSA = *mut libc::c_void;
 
 pub type PrivateKeyWriteCallback = extern "C" fn(buf: *mut c_char, size: c_int, rwflag: c_int, user_data: *mut c_void) -> c_int;
 
-#[link(name = "crypto")]
-extern {
+extern "C" {
     fn EVP_PKEY_new() -> *mut EVP_PKEY;
     fn EVP_PKEY_free(k: *mut EVP_PKEY);
     fn EVP_PKEY_assign(pkey: *mut EVP_PKEY, typ: c_int, key: *const c_char) -> c_int;

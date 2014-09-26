@@ -32,8 +32,7 @@ pub struct EVP_MD;
 #[repr(C)]
 pub struct EVP_PKEY_CTX;
 
-#[link(name = "crypto")]
-extern {
+extern "C" {
     fn EVP_MD_CTX_create() -> *mut EVP_MD_CTX;
     fn EVP_MD_CTX_destroy(ctx: *mut EVP_MD_CTX);
 

@@ -29,8 +29,7 @@ pub struct HMAC_CTX {
     key: [c_uchar, ..128]
 }
 
-#[link(name = "crypto")]
-extern {
+extern "C" {
     fn HMAC_CTX_init(ctx: *mut HMAC_CTX);
     fn HMAC_Init_ex(ctx: *mut HMAC_CTX, key: *const u8, keylen: c_int, md: *const hash::EVP_MD, imple: *const ENGINE);
     fn HMAC_Update(ctx: *mut HMAC_CTX, input: *const u8, len: c_uint);

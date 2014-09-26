@@ -1,4 +1,3 @@
-
 use libc::{c_void, c_int, c_ulong};
 use std::ptr;
 
@@ -17,8 +16,7 @@ struct BIGNUM {
 #[allow(non_camel_case_types)]
 type BN_CTX = *mut c_void;
 
-#[link(name = "crypto")]
-extern {
+extern "C" {
     fn BN_new() -> *mut BIGNUM;
     fn BN_clear_free(bn: *mut BIGNUM);
 
