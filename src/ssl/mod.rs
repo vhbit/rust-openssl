@@ -7,7 +7,9 @@ use std::string;
 use sync::Arc;
 use sync::one::{Once, ONCE_INIT};
 
-use ssl::error::{SslError, SslSessionClosed, StreamError, OpenSslErrors, OpensslError, UnknownError};
+use bio::{mod, MemBio};
+use ssl::error::{SslError, SslSessionClosed, StreamError, OpenSslErrors, UnknownError};
+use x509::{mod, X509StoreContext, X509FileType};
 
 pub mod error;
 mod ffi;
@@ -17,15 +19,6 @@ mod tests;
 
 static mut VERIFY_IDX: c_int = -1;
 static mut MUTEXES: *mut Vec<NativeMutex> = 0 as *mut Vec<NativeMutex>;
-
-macro_rules! try_ssl(
-    ($e:expr) => (
-        match $e {
-            Ok(ok) => ok,
-            Err(err) => return Err(StreamError(err))
-        }
-    )
-)
 
 fn init() {
     static mut INIT: Once = ONCE_INIT;
@@ -54,7 +47,7 @@ fn init() {
 #[deriving(Show, Hash, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
 pub enum SslMethod {
-    #[cfg(sslv2)]
+    #[cfg(feature = "sslv2")]
     /// Only support the SSLv2 protocol
     Sslv2,
     /// Only support the SSLv3 protocol
@@ -63,19 +56,23 @@ pub enum SslMethod {
     Tlsv1,
     /// Support the SSLv2, SSLv3 and TLSv1 protocols
     Sslv23,
+    #[cfg(feature = "tlsv1_1")]
     Tlsv1_1,
+    #[cfg(feature = "tlsv1_2")]
     Tlsv1_2,
 }
 
 impl SslMethod {
     unsafe fn to_raw(&self) -> *const ffi::SSL_METHOD {
         match *self {
-            #[cfg(sslv2)]
+            #[cfg(feature = "sslv2")]
             Sslv2 => ffi::SSLv2_method(),
             Sslv3 => ffi::SSLv3_method(),
             Tlsv1 => ffi::TLSv1_method(),
             Sslv23 => ffi::SSLv23_method(),
+            #[cfg(feature = "tlsv1_1")]
             Tlsv1_1 => ffi::TLSv1_1_method(),
+            #[cfg(feature = "tlsv1_2")]
             Tlsv1_2 => ffi::TLSv1_2_method()
         }
     }
@@ -103,16 +100,16 @@ extern fn locking_function(mode: c_int, n: c_int, _file: *const c_char,
     }
 }
 
-extern fn raw_verify(preverify_ok: c_int, x509_ctx: *mut ffi::X509_STORE_CTX)
+extern fn raw_verify(preverify_ok: c_int, x509_ctx: *mut x509::ffi::X509_STORE_CTX)
         -> c_int {
     unsafe {
         let idx = ffi::SSL_get_ex_data_X509_STORE_CTX_idx();
-        let ssl = ffi::X509_STORE_CTX_get_ex_data(x509_ctx, idx);
+        let ssl = x509::ffi::X509_STORE_CTX_get_ex_data(x509_ctx, idx);
         let ssl_ctx = ffi::SSL_get_SSL_CTX(ssl);
         let verify = ffi::SSL_CTX_get_ex_data(ssl_ctx, VERIFY_IDX);
         let verify: Option<VerifyCallback> = mem::transmute(verify);
 
-        let ctx = X509StoreContext { ctx: x509_ctx };
+        let ctx = X509StoreContext::new(x509_ctx);
 
         match verify {
             None => preverify_ok,
@@ -125,11 +122,14 @@ extern fn raw_verify(preverify_ok: c_int, x509_ctx: *mut ffi::X509_STORE_CTX)
 pub type VerifyCallback = fn(preverify_ok: bool,
                              x509_ctx: &X509StoreContext) -> bool;
 
-#[repr(i32)]
-pub enum X509FileType {
-    PEM = ffi::X509_FILETYPE_PEM,
-    ASN1 = ffi::X509_FILETYPE_ASN1,
-    Default = ffi::X509_FILETYPE_DEFAULT
+// FIXME: macro may be instead of inlining?
+#[inline]
+fn wrap_ssl_result(res: c_int) -> Option<SslError> {
+    if res == 0 {
+        Some(SslError::get())
+    } else {
+        None
+    }
 }
 
 /// An SSL context object
@@ -149,7 +149,7 @@ impl SslContext {
         init();
 
         let ctx = unsafe { ffi::SSL_CTX_new(method.to_raw()) };
-        if ctx == ptr::mut_null() {
+        if ctx == ptr::null_mut() {
             return Err(SslError::get());
         }
 
@@ -169,168 +169,49 @@ impl SslContext {
     #[allow(non_snake_case)]
     /// Specifies the file that contains trusted CA certificates.
     pub fn set_CA_file(&mut self, file: &str) -> Option<SslError> {
-        let ret = file.with_c_str(|file| {
+        wrap_ssl_result(file.with_c_str(|file| {
             unsafe {
                 ffi::SSL_CTX_load_verify_locations(self.ctx, file, ptr::null())
             }
-        });
-
-        if ret == 0 {
-            Some(SslError::get())
-        } else {
-            None
-        }
+        }))
     }
 
     /// Specifies the file that is client certificate
-    pub fn set_certificate_file(&mut self, file: &str, file_type: X509FileType)
-    -> Option<SslError> {
-        let ret = file.with_c_str(|file| {
+    pub fn set_certificate_file(&mut self, file: &str,
+                                file_type: X509FileType) -> Option<SslError> {
+        wrap_ssl_result(file.with_c_str(|file| {
             unsafe {
                 ffi::SSL_CTX_use_certificate_file(self.ctx, file, file_type as c_int)
             }
-        });
-
-        if ret == 0 {
-            Some(SslError::get())
-        } else {
-            None
-        }
+        }))
     }
 
-    /// Specifies the file that is client certificate
-    pub fn set_private_key_file(&mut self, file: &str, file_type: X509FileType)
-    -> Option<SslError> {
-        let ret = file.with_c_str(|file| {
+    /// Specifies the file that is client private key
+    pub fn set_private_key_file(&mut self, file: &str,
+                                file_type: X509FileType) -> Option<SslError> {
+        wrap_ssl_result(file.with_c_str(|file| {
             unsafe {
                 ffi::SSL_CTX_use_PrivateKey_file(self.ctx, file, file_type as c_int)
             }
-        });
-
-        if ret == 0 {
-            Some(SslError::get())
-        } else {
-            None
-        }
-    }
-}
-
-pub struct X509StoreContext {
-    ctx: *mut ffi::X509_STORE_CTX
-}
-
-impl X509StoreContext {
-    pub fn get_error(&self) -> Option<X509ValidationError> {
-        let err = unsafe { ffi::X509_STORE_CTX_get_error(self.ctx) };
-        X509ValidationError::from_raw(err)
-    }
-
-    pub fn get_current_cert<'a>(&'a self) -> Option<X509<'a>> {
-        let ptr = unsafe { ffi::X509_STORE_CTX_get_current_cert(self.ctx) };
-
-        if ptr.is_null() {
-            None
-        } else {
-            Some(X509 { ctx: self, x509: ptr })
-        }
+        }))
     }
 }
 
 #[allow(dead_code)]
-/// A public key certificate
-pub struct X509<'ctx> {
-    ctx: &'ctx X509StoreContext,
-    x509: *mut ffi::X509
+struct MemBioRef<'ssl> {
+    ssl: &'ssl Ssl,
+    bio: MemBio,
 }
 
-impl<'ctx> X509<'ctx> {
-    pub fn subject_name<'a>(&'a self) -> X509Name<'a> {
-        let name = unsafe { ffi::X509_get_subject_name(self.x509) };
-        X509Name { x509: self, name: name }
+impl<'ssl> MemBioRef<'ssl> {
+    fn read(&mut self, buf: &mut [u8]) -> Option<uint> {
+        (&mut self.bio as &mut Reader).read(buf).ok()
+    }
+
+    fn write(&mut self, buf: &[u8]) {
+        let _ = (&mut self.bio as &mut Writer).write(buf);
     }
 }
-
-#[allow(dead_code)]
-pub struct X509Name<'x> {
-    x509: &'x X509<'x>,
-    name: *mut ffi::X509_NAME
-}
-
-macro_rules! make_validation_error(
-    ($ok_val:ident, $($name:ident = $val:ident,)+) => (
-        pub enum X509ValidationError {
-            $($name,)+
-            X509UnknownError(c_int)
-        }
-
-        impl X509ValidationError {
-            #[doc(hidden)]
-            pub fn from_raw(err: c_int) -> Option<X509ValidationError> {
-                match err {
-                    self::ffi::$ok_val => None,
-                    $(self::ffi::$val => Some($name),)+
-                    err => Some(X509UnknownError(err))
-                }
-            }
-        }
-    )
-)
-
-make_validation_error!(X509_V_OK,
-    X509UnableToGetIssuerCert = X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT,
-    X509UnableToGetCrl = X509_V_ERR_UNABLE_TO_GET_CRL,
-    X509UnableToDecryptCertSignature = X509_V_ERR_UNABLE_TO_DECRYPT_CERT_SIGNATURE,
-    X509UnableToDecryptCrlSignature = X509_V_ERR_UNABLE_TO_DECRYPT_CRL_SIGNATURE,
-    X509UnableToDecodeIssuerPublicKey = X509_V_ERR_UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY,
-    X509CertSignatureFailure = X509_V_ERR_CERT_SIGNATURE_FAILURE,
-    X509CrlSignatureFailure = X509_V_ERR_CRL_SIGNATURE_FAILURE,
-    X509CertNotYetValid = X509_V_ERR_CERT_NOT_YET_VALID,
-    X509CertHasExpired = X509_V_ERR_CERT_HAS_EXPIRED,
-    X509CrlNotYetValid = X509_V_ERR_CRL_NOT_YET_VALID,
-    X509CrlHasExpired = X509_V_ERR_CRL_HAS_EXPIRED,
-    X509ErrorInCertNotBeforeField = X509_V_ERR_ERROR_IN_CERT_NOT_BEFORE_FIELD,
-    X509ErrorInCertNotAfterField = X509_V_ERR_ERROR_IN_CERT_NOT_AFTER_FIELD,
-    X509ErrorInCrlLastUpdateField = X509_V_ERR_ERROR_IN_CRL_LAST_UPDATE_FIELD,
-    X509ErrorInCrlNextUpdateField = X509_V_ERR_ERROR_IN_CRL_NEXT_UPDATE_FIELD,
-    X509OutOfMem = X509_V_ERR_OUT_OF_MEM,
-    X509DepthZeroSelfSignedCert = X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT,
-    X509SelfSignedCertInChain = X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN,
-    X509UnableToGetIssuerCertLocally = X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY,
-    X509UnableToVerifyLeafSignature = X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE,
-    X509CertChainTooLong = X509_V_ERR_CERT_CHAIN_TOO_LONG,
-    X509CertRevoked = X509_V_ERR_CERT_REVOKED,
-    X509InvalidCA = X509_V_ERR_INVALID_CA,
-    X509PathLengthExceeded = X509_V_ERR_PATH_LENGTH_EXCEEDED,
-    X509InvalidPurpose = X509_V_ERR_INVALID_PURPOSE,
-    X509CertUntrusted = X509_V_ERR_CERT_UNTRUSTED,
-    X509CertRejected = X509_V_ERR_CERT_REJECTED,
-    X509SubjectIssuerMismatch = X509_V_ERR_SUBJECT_ISSUER_MISMATCH,
-    X509AkidSkidMismatch = X509_V_ERR_AKID_SKID_MISMATCH,
-    X509AkidIssuerSerialMismatch = X509_V_ERR_AKID_ISSUER_SERIAL_MISMATCH,
-    X509KeyusageNoCertsign = X509_V_ERR_KEYUSAGE_NO_CERTSIGN,
-    X509UnableToGetCrlIssuer = X509_V_ERR_UNABLE_TO_GET_CRL_ISSUER,
-    X509UnhandledCriticalExtension = X509_V_ERR_UNHANDLED_CRITICAL_EXTENSION,
-    X509KeyusageNoCrlSign = X509_V_ERR_KEYUSAGE_NO_CRL_SIGN,
-    X509UnhandledCriticalCrlExtension = X509_V_ERR_UNHANDLED_CRITICAL_CRL_EXTENSION,
-    X509InvalidNonCA = X509_V_ERR_INVALID_NON_CA,
-    X509ProxyPathLengthExceeded = X509_V_ERR_PROXY_PATH_LENGTH_EXCEEDED,
-    X509KeyusageNoDigitalSignature = X509_V_ERR_KEYUSAGE_NO_DIGITAL_SIGNATURE,
-    X509ProxyCertificatesNotAllowed = X509_V_ERR_PROXY_CERTIFICATES_NOT_ALLOWED,
-    X509InvalidExtension = X509_V_ERR_INVALID_EXTENSION,
-    X509InavlidPolicyExtension = X509_V_ERR_INVALID_POLICY_EXTENSION,
-    X509NoExplicitPolicy = X509_V_ERR_NO_EXPLICIT_POLICY,
-    X509DifferentCrlScope = X509_V_ERR_DIFFERENT_CRL_SCOPE,
-    X509UnsupportedExtensionFeature = X509_V_ERR_UNSUPPORTED_EXTENSION_FEATURE,
-    X509UnnestedResource = X509_V_ERR_UNNESTED_RESOURCE,
-    X509PermittedVolation = X509_V_ERR_PERMITTED_VIOLATION,
-    X509ExcludedViolation = X509_V_ERR_EXCLUDED_VIOLATION,
-    X509SubtreeMinmax = X509_V_ERR_SUBTREE_MINMAX,
-    X509UnsupportedConstraintType = X509_V_ERR_UNSUPPORTED_CONSTRAINT_TYPE,
-    X509UnsupportedConstraintSyntax = X509_V_ERR_UNSUPPORTED_CONSTRAINT_SYNTAX,
-    X509UnsupportedNameSyntax = X509_V_ERR_UNSUPPORTED_NAME_SYNTAX,
-    X509CrlPathValidationError= X509_V_ERR_CRL_PATH_VALIDATION_ERROR,
-    X509ApplicationVerification = X509_V_ERR_APPLICATION_VERIFICATION,
-)
 
 pub struct Ssl {
     ssl: *mut ffi::SSL
@@ -345,23 +226,15 @@ impl Drop for Ssl {
 impl Ssl {
     pub fn new(ctx: &SslContext) -> Result<Ssl, SslError> {
         let ssl = unsafe { ffi::SSL_new(ctx.ctx) };
-        if ssl == ptr::mut_null() {
+        if ssl == ptr::null_mut() {
             return Err(SslError::get());
         }
         let ssl = Ssl { ssl: ssl };
 
-        let rbio = unsafe { ffi::BIO_new(ffi::BIO_s_mem()) };
-        if rbio == ptr::mut_null() {
-            return Err(SslError::get());
-        }
+        let rbio = try!(MemBio::new());
+        let wbio = try!(MemBio::new());
 
-        let wbio = unsafe { ffi::BIO_new(ffi::BIO_s_mem()) };
-        if wbio == ptr::mut_null() {
-            unsafe { ffi::BIO_free_all(rbio) }
-            return Err(SslError::get());
-        }
-
-        unsafe { ffi::SSL_set_bio(ssl.ssl, rbio, wbio) }
+        unsafe { ffi::SSL_set_bio(ssl.ssl, rbio.unwrap(), wbio.unwrap()) }
         Ok(ssl)
     }
 
@@ -373,14 +246,11 @@ impl Ssl {
         unsafe { self.wrap_bio(ffi::SSL_get_wbio(self.ssl)) }
     }
 
-    fn wrap_bio<'a>(&'a self, bio: *mut ffi::BIO) -> MemBioRef<'a> {
+    fn wrap_bio<'a>(&'a self, bio: *mut bio::ffi::BIO) -> MemBioRef<'a> {
         assert!(bio != ptr::mut_null());
         MemBioRef {
             ssl: self,
-            bio: MemBio {
-                bio: bio,
-                owned: false
-            }
+            bio: MemBio::borrowed(bio)
         }
     }
 
@@ -451,61 +321,7 @@ enum LibSslError {
     ErrorWantAccept = ffi::SSL_ERROR_WANT_ACCEPT,
 }
 
-#[allow(dead_code)]
-struct MemBioRef<'ssl> {
-    ssl: &'ssl Ssl,
-    bio: MemBio,
-}
 
-impl<'ssl> MemBioRef<'ssl> {
-    fn read(&self, buf: &mut [u8]) -> Option<uint> {
-        self.bio.read(buf)
-    }
-
-    fn write(&self, buf: &[u8]) {
-        self.bio.write(buf)
-    }
-}
-
-struct MemBio {
-    bio: *mut ffi::BIO,
-    owned: bool
-}
-
-impl Drop for MemBio {
-    fn drop(&mut self) {
-        if self.owned {
-            unsafe {
-                ffi::BIO_free_all(self.bio);
-            }
-        }
-    }
-}
-
-impl MemBio {
-    fn read(&self, buf: &mut [u8]) -> Option<uint> {
-        let ret = unsafe {
-            ffi::BIO_read(self.bio, buf.as_ptr() as *mut c_void,
-                          buf.len() as c_int)
-        };
-
-        if ret < 0 {
-            None
-        } else {
-            Some(ret as uint)
-        }
-    }
-
-    fn write(&self, buf: &[u8]) {
-        let ret = unsafe {
-            ffi::BIO_write(self.bio, buf.as_ptr() as *const c_void,
-                           buf.len() as c_int)
-        };
-        assert_eq!(buf.len(), ret as uint);
-    }
-}
-
-// Maximum TLS record size is 16k
 static DEFAULT_STREAM_BUF_SIZE: uint = 16 * 1024;
 
 /// A stream wrapper which handles SSL encryption for an underlying stream.
@@ -552,11 +368,11 @@ impl<S: Stream> SslStream<S> {
 
             match self.ssl.get_error(ret) {
                 ErrorWantRead => {
-                    try_ssl!(self.flush());
-                    let len = try_ssl!(self.stream.read(self.read_buf.as_mut_slice()));
+                    try_ssl_stream!(self.flush());
+                    let len = try_ssl_stream!(self.stream.read(self.read_buf.as_mut_slice()));
                     self.ssl.get_rbio().write(self.read_buf.slice_to(len));
                 }
-                ErrorWantWrite => { try_ssl!(self.flush()) }
+                ErrorWantWrite => { try_ssl_stream!(self.flush()) }
                 ErrorZeroReturn => return Err(SslSessionClosed),
                 ErrorSsl => return Err(SslError::get()),
                 _ => unreachable!()

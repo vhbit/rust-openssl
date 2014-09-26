@@ -4,3 +4,12 @@ name = "openssl"
 version = "0.0.1"
 authors = ["Steven Fackler <sfackler@gmail.com"]
 
+[lib]
+
+name = "openssl"
+path = "src/lib.rs"
+
+[features]
+tlsv1_2 = []
+tlsv1_1 = []
+sslv2 = []
