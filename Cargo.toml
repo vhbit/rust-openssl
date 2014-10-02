@@ -10,6 +10,7 @@ name = "openssl"
 path = "src/lib.rs"
 
 [features]
+sslv2 = []
+thread_id = []
 tlsv1_2 = []
 tlsv1_1 = []
-sslv2 = []

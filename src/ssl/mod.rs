@@ -1,18 +1,21 @@
 use libc::{c_int, c_void, c_long};
-use std::io::{IoResult, IoError, EndOfFile, Stream, Reader, Writer};
+use std::cell::{UnsafeCell};
+use std::io::{mod, IoResult, IoError, Reader, Stream, Writer};
 use std::mem;
 use std::ptr;
 use std::string;
+use std::sync::{Arc, Semaphore};
 use sync::one::{Once, ONCE_INIT};
 
 use bio::{MemBio};
 use ffi;
-use ssl::error::{SslError, SslSessionClosed, StreamError};
+use ssl::error::{OpenSslErrors, SslError, SslSessionClosed, StreamError};
 use x509::{X509StoreContext, X509FileType};
 
 pub mod error;
 #[cfg(test)]
 mod tests;
+
 
 static mut VERIFY_IDX: c_int = -1;
 
@@ -323,25 +326,36 @@ impl Ssl {
     }
 
     fn connect(&self) -> c_int {
-        unsafe { ffi::SSL_connect(self.ssl) }
+        unsafe {
+            ffi::ERR_clear_error();
+            ffi::SSL_connect(self.ssl)
+        }
     }
 
     fn read(&self, buf: &mut [u8]) -> c_int {
-        unsafe { ffi::SSL_read(self.ssl, buf.as_ptr() as *mut c_void,
-                               buf.len() as c_int) }
+        unsafe {
+            ffi::ERR_clear_error();
+            ffi::SSL_read(self.ssl, buf.as_ptr() as *mut c_void,
+                          buf.len() as c_int)
+        }
     }
 
     fn write(&self, buf: &[u8]) -> c_int {
-        unsafe { ffi::SSL_write(self.ssl, buf.as_ptr() as *const c_void,
-                                buf.len() as c_int) }
+        unsafe {
+            ffi::ERR_clear_error();
+            ffi::SSL_write(self.ssl, buf.as_ptr() as *const c_void,
+                           buf.len() as c_int)
+        }
     }
 
     fn get_error(&self, ret: c_int) -> LibSslError {
         let err = unsafe { ffi::SSL_get_error(self.ssl, ret) };
-        match FromPrimitive::from_int(err as int) {
+        let res = match FromPrimitive::from_int(err as int) {
             Some(err) => err,
             None => unreachable!()
-        }
+        };
+        unsafe { ffi::ERR_clear_error() };
+        res
     }
 
     /// Set the host name to be used with SNI (Server Name Indication).
@@ -368,7 +382,7 @@ impl Ssl {
 
 }
 
-#[deriving(FromPrimitive)]
+#[deriving(FromPrimitive, Show)]
 #[repr(i32)]
 enum LibSslError {
     ErrorNone = ffi::SSL_ERROR_NONE,
@@ -382,68 +396,133 @@ enum LibSslError {
     ErrorWantAccept = ffi::SSL_ERROR_WANT_ACCEPT,
 }
 
+
+fn default_ssl_buf() -> Vec<u8> {
+    // Maximum TLS record size is 16k
+    Vec::from_elem(16 * 1024, 0)
+}
+
 /// A stream wrapper which handles SSL encryption for an underlying stream.
 pub struct SslStream<S> {
-    stream: S,
-    ssl: Ssl,
-    buf: Vec<u8>
+    stream: UnsafeCell<S>,
+    ssl: Arc<Ssl>,
+    // Caveat: it is supposed to work like 1 SslStream per thread
+    // if there are multiple streams in one thread, buf should be
+    // locked too
+    buf: UnsafeCell<Vec<u8>>,
+    reader_sem: Arc<Semaphore>,
+    writer_sem: Arc<Semaphore>,
+    slurp_sem: Arc<Semaphore>,
+    spit_sem: Arc<Semaphore>,
 }
 
 impl<S: Stream> SslStream<S> {
     /// Attempts to create a new SSL stream from a given `Ssl` instance.
     pub fn new_from(ssl: Ssl, stream: S) -> Result<SslStream<S>, SslError> {
-        let mut ssl = SslStream {
-            stream: stream,
-            ssl: ssl,
-            // Maximum TLS record size is 16k
-            buf: Vec::from_elem(16 * 1024, 0u8)
+        let ssl = SslStream {
+            stream: UnsafeCell::new(stream),
+            ssl: Arc::new(ssl),
+            buf: UnsafeCell::new(default_ssl_buf()),
+            reader_sem: Arc::new(Semaphore::new(1)),
+            writer_sem: Arc::new(Semaphore::new(1)),
+            slurp_sem: Arc::new(Semaphore::new(1)),
+            spit_sem: Arc::new(Semaphore::new(1))
         };
 
-        match ssl.in_retry_wrapper(|ssl| { ssl.connect() }) {
-            Ok(_) => Ok(ssl),
-            Err(err) => Err(err)
-        }
+        ssl.in_retry_wrapper(|ssl| { ssl.connect() }).and(Ok(ssl))
     }
 
     /// Creates a new SSL stream
     pub fn new(ctx: &SslContext, stream: S) -> Result<SslStream<S>, SslError> {
-        let ssl = match Ssl::new(ctx) {
-            Ok(ssl) => ssl,
-            Err(err) => return Err(err)
-        };
+        let ssl = try!(Ssl::new(ctx));
 
         SslStream::new_from(ssl, stream)
     }
 
-    fn in_retry_wrapper(&mut self, blk: |&Ssl| -> c_int)
-            -> Result<c_int, SslError> {
+    fn in_retry_wrapper(&self, blk: |&Ssl| -> c_int) -> Result<c_int, SslError> {
         loop {
-            let ret = blk(&self.ssl);
+            let ret = blk(&*self.ssl);
             if ret > 0 {
                 return Ok(ret);
             }
 
             match self.ssl.get_error(ret) {
                 ErrorWantRead => {
-                    try_ssl_stream!(self.flush());
-                    let len = try_ssl_stream!(self.stream.read(self.buf.as_mut_slice()));
-                    self.ssl.get_rbio().write(self.buf.slice_to(len));
+                    try_ssl_stream!(self.do_flush());
+                    try_ssl_stream!(self.slurp());
                 }
-                ErrorWantWrite => { try_ssl_stream!(self.flush()) }
+                ErrorWantWrite => { try_ssl_stream!(self.do_flush()) }
                 ErrorZeroReturn => return Err(SslSessionClosed),
                 ErrorSsl => return Err(SslError::get()),
-                _ => unreachable!()
+                ErrorSyscall => {
+                    /* According to SSL docs:
+                    If ret == 0, an EOF was observed that violates the protocol.
+                    If ret == -1, the underlying BIO reported an I/O error
+
+                    BIO errors aren't 100% fatal ones so we can try to loop
+                    a little bit longer
+                     */
+                    match ret {
+                        0 => return Err(SslSessionClosed),
+                        -1 => (), // debug!("underlying BIO error"),
+                        _ => unreachable!()
+                    }
+                },
+                err@_ => fail!("unreachable: {}", err)
             }
         }
     }
 
-    fn write_through(&mut self) -> IoResult<()> {
+    fn get_stream<'a>(&'a self) -> &'a mut S {
+        // Stream is there while we exist
+        unsafe { &mut *self.stream.get() }
+    }
+
+    fn get_buf<'a>(&'a self) -> &'a mut Vec<u8> {
+        // Buf is there while we exist
+        unsafe { &mut *self.buf.get() }
+    }
+
+    fn do_flush(&self) -> IoResult<()> {
+        self.write_through()
+            .and_then(|_| self.get_stream().flush() )
+    }
+
+    fn slurp(&self) -> IoResult<()> {
+        // Lock again as reader and writer might want to
+        // read data simultaneously. They should wait
+        // until data completely copied
+        //
+        // FIXME: actually, if someone has already read
+        // data from stream, may be operation could be
+        // retried even without additional reading
+        let guard = self.slurp_sem.access();
+
+        let buf = self.get_buf();
+        let len = try!(self.get_stream().read(buf.as_mut_slice()));
+        self.ssl.get_rbio().write(buf.slice_to(len));
+        drop(guard);
+        Ok(())
+    }
+
+    fn write_through(&self) -> IoResult<()> {
+        // Lock again as reader and writer might want to
+        // read data simultaneously. They should wait
+        // until data completely written
+        //
+        // FIXME: actually, if someone has already read
+        // data from stream, may be operation could be
+        // retried even without additional writing
+        let guard = self.spit_sem.access();
+
+        let buf = self.get_buf();
         loop {
-            match self.ssl.get_wbio().read(self.buf.as_mut_slice()) {
-                Some(len) => try!(self.stream.write(self.buf.slice_to(len))),
+            match self.ssl.get_wbio().read(buf.as_mut_slice()) {
+                Some(len) => try!(self.get_stream().write(buf.slice_to(len))),
                 None => break
             };
-        }
+        };
+        drop(guard);
         Ok(())
     }
 
@@ -465,38 +544,75 @@ impl<S: Stream> SslStream<S> {
 
 impl<S: Stream> Reader for SslStream<S> {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<uint> {
-        match self.in_retry_wrapper(|ssl| { ssl.read(buf) }) {
+        // Place readers in line
+        let guard = self.reader_sem.access();
+
+        let res = match self.in_retry_wrapper(|ssl| { ssl.read(buf) }) {
             Ok(len) => Ok(len as uint),
             Err(SslSessionClosed) =>
                 Err(IoError {
-                    kind: EndOfFile,
+                    kind: io::EndOfFile, // Should it be changed to ConnectionAborted?
                     desc: "SSL session closed",
                     detail: None
                 }),
             Err(StreamError(e)) => Err(e),
-            _ => unreachable!()
-        }
+            Err(OpenSslErrors(errs)) => {
+                Err(IoError {
+                    kind: io::OtherIoError,
+                    desc: "SSL error",
+                    detail: Some(format!("SSL stream read: {}", errs))
+                })
+            },
+        };
+        drop(guard);
+        res
     }
 }
 
 impl<S: Stream> Writer for SslStream<S> {
     fn write(&mut self, buf: &[u8]) -> IoResult<()> {
+        // Place writers in line
+        let guard = self.writer_sem.access();
+
         let mut start = 0;
         while start < buf.len() {
             let ret = self.in_retry_wrapper(|ssl| {
-                ssl.write(buf.split_at(start).val1())
+                ssl.write(buf.slice_from(start))
             });
             match ret {
                 Ok(len) => start += len as uint,
-                _ => unreachable!()
+                Err(SslSessionClosed) => {
+                    return Err(IoError {
+                        kind: io::ConnectionAborted,
+                        desc: "SSL session closed",
+                        detail: None
+                    });
+                },
+                Err(StreamError(e)) => return Err(e),
+                Err(e) => fail!("SSL stream write: {}", e)
             }
             try!(self.write_through());
         }
+        drop(guard);
         Ok(())
     }
 
     fn flush(&mut self) -> IoResult<()> {
-        try!(self.write_through());
-        self.stream.flush()
+        self.do_flush()
+    }
+}
+
+impl<S: Stream + Clone> Clone for SslStream<S> {
+    // Note: clone should be called only after establishing connection
+    fn clone(&self) -> SslStream<S> {
+        SslStream {
+            stream: UnsafeCell::new(self.get_stream().clone()),
+            ssl: self.ssl.clone(),
+            buf: UnsafeCell::new(default_ssl_buf()),
+            reader_sem: self.reader_sem.clone(),
+            writer_sem: self.writer_sem.clone(),
+            slurp_sem: self.slurp_sem.clone(),
+            spit_sem: self.spit_sem.clone(),
+        }
     }
 }
