@@ -22,6 +22,8 @@ pub type BIO_METHOD = c_void;
 pub type BN_CTX = c_void;
 pub type COMP_METHOD = c_void;
 pub type CRYPTO_EX_DATA = c_void;
+#[cfg(feature = "thread_id")]
+pub type CRYPTO_THREADID = c_void;
 pub type ENGINE = c_void;
 pub type EVP_CIPHER = c_void;
 pub type EVP_CIPHER_CTX = c_void;
@@ -89,6 +91,8 @@ pub struct BIGNUM {
 }
 
 impl Copy for BIGNUM {}
+#[cfg(feature = "thread_id")]
+pub type CryptoThreadIdCallback = extern "C" fn(thread_id: *mut CRYPTO_THREADID);
 
 pub type CRYPTO_EX_new = extern "C" fn(parent: *mut c_void, ptr: *mut c_void,
                                        ad: *const CRYPTO_EX_DATA, idx: c_int,
@@ -196,6 +200,37 @@ pub const X509_V_OK: c_int = 0;
 static mut MUTEXES: *mut Vec<StaticMutex> = 0 as *mut Vec<StaticMutex>;
 static mut GUARDS: *mut Vec<Option<MutexGuard<'static, ()>>> = 0 as *mut Vec<Option<MutexGuard<'static, ()>>>;
 
+#[cfg(feature = "thread_id")]
+mod thread_lock {
+    #[cfg(unix)]
+    pub fn init() {
+        use libc::pthread_t;
+
+        extern "C" {
+            fn pthread_self() -> pthread_t;
+        };
+
+        extern "C" fn threadid_callback(id: *mut super::CRYPTO_THREADID) {
+            unsafe { super::CRYPTO_THREADID_set_numeric(id, pthread_self()) };
+        };
+
+        unsafe { super::CRYPTO_THREADID_set_callback(threadid_callback) };
+    }
+
+    // FIXME: is there pthread_self on Windows?
+    #[cfg(not(unix))]
+    pub fn init() {
+
+    }
+}
+
+#[cfg(not(feature = "thread_id"))]
+mod thread_lock {
+    pub fn init() {
+
+    }
+}
+
 extern fn locking_function(mode: c_int, n: c_int, _file: *const c_char,
                                _line: c_int) {
     unsafe {
@@ -225,6 +260,8 @@ pub fn init() {
             GUARDS = mem::transmute(guards);
 
             CRYPTO_set_locking_callback(locking_function);
+
+            thread_lock::init();
         })
     }
 }
@@ -325,6 +362,14 @@ extern "C" {
     pub fn CRYPTO_memcmp(a: *const c_void, b: *const c_void,
                          len: size_t) -> c_int;
 
+    #[cfg(feature = "thread_id")]
+    pub fn CRYPTO_THREADID_set_callback(callback: CryptoThreadIdCallback) -> c_int;
+    #[cfg(feature = "thread_id")]
+    pub fn CRYPTO_THREADID_set_numeric(id: *mut CRYPTO_THREADID, val: c_ulong);
+    #[cfg(feature = "thread_id")]
+    pub fn CRYPTO_THREADID_set_pointer(id: *mut CRYPTO_THREADID, val: *mut c_void);
+
+    pub fn ERR_clear_error() -> c_void;
     pub fn ERR_get_error() -> c_ulong;
 
     pub fn ERR_lib_error_string(err: c_ulong) -> *const c_char;
