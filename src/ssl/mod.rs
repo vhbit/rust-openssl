@@ -4,7 +4,7 @@ use std::io::{mod, IoResult, IoError, Reader, Stream, Writer};
 use std::mem;
 use std::ptr;
 use std::string;
-use std::sync::{Arc, Semaphore};
+use std::sync::{Arc, Mutex, Semaphore};
 use sync::one::{Once, ONCE_INIT};
 
 use bio::{MemBio};
@@ -406,10 +406,7 @@ fn default_ssl_buf() -> Vec<u8> {
 pub struct SslStream<S> {
     stream: UnsafeCell<S>,
     ssl: Arc<Ssl>,
-    // Caveat: it is supposed to work like 1 SslStream per thread
-    // if there are multiple streams in one thread, buf should be
-    // locked too
-    buf: UnsafeCell<Vec<u8>>,
+    buf: Mutex<UnsafeCell<Vec<u8>>>,
     reader_sem: Arc<Semaphore>,
     writer_sem: Arc<Semaphore>,
     slurp_sem: Arc<Semaphore>,
@@ -422,7 +419,7 @@ impl<S: Stream> SslStream<S> {
         let ssl = SslStream {
             stream: UnsafeCell::new(stream),
             ssl: Arc::new(ssl),
-            buf: UnsafeCell::new(default_ssl_buf()),
+            buf: Mutex::new(UnsafeCell::new(default_ssl_buf())),
             reader_sem: Arc::new(Semaphore::new(1)),
             writer_sem: Arc::new(Semaphore::new(1)),
             slurp_sem: Arc::new(Semaphore::new(1)),
@@ -478,11 +475,6 @@ impl<S: Stream> SslStream<S> {
         unsafe { &mut *self.stream.get() }
     }
 
-    fn get_buf<'a>(&'a self) -> &'a mut Vec<u8> {
-        // Buf is there while we exist
-        unsafe { &mut *self.buf.get() }
-    }
-
     // Can't use `flush` as it requires mutability of self
     fn do_flush(&self) -> IoResult<()> {
         self.write_through()
@@ -499,7 +491,8 @@ impl<S: Stream> SslStream<S> {
         // retried even without additional reading
         let guard = self.slurp_sem.access();
 
-        let buf = self.get_buf();
+        let buf_guard = self.buf.lock();
+        let buf = unsafe { &mut *buf_guard.get() };
         let len = try!(self.get_stream().read(buf.as_mut_slice()));
         self.ssl.get_rbio().write(buf.slice_to(len));
         drop(guard);
@@ -516,7 +509,8 @@ impl<S: Stream> SslStream<S> {
         // retried even without additional writing
         let guard = self.spit_sem.access();
 
-        let buf = self.get_buf();
+        let buf_guard = self.buf.lock();
+        let buf = unsafe { &mut *buf_guard.get() };
         loop {
             match self.ssl.get_wbio().read(buf.as_mut_slice()) {
                 Some(len) => try!(self.get_stream().write(buf.slice_to(len))),
@@ -619,7 +613,7 @@ impl<S: Stream + Clone> Clone for SslStream<S> {
         SslStream {
             stream: UnsafeCell::new(self.get_stream().clone()),
             ssl: self.ssl.clone(),
-            buf: UnsafeCell::new(default_ssl_buf()),
+            buf: Mutex::new(UnsafeCell::new(default_ssl_buf())),
             reader_sem: self.reader_sem.clone(),
             writer_sem: self.writer_sem.clone(),
             slurp_sem: self.slurp_sem.clone(),
