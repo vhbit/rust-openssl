@@ -483,6 +483,7 @@ impl<S: Stream> SslStream<S> {
         unsafe { &mut *self.buf.get() }
     }
 
+    // Can't use `flush` as it requires mutability of self
     fn do_flush(&self) -> IoResult<()> {
         self.write_through()
             .and_then(|_| self.get_stream().flush() )
@@ -571,30 +572,38 @@ impl<S: Stream> Reader for SslStream<S> {
 
 impl<S: Stream> Writer for SslStream<S> {
     fn write(&mut self, buf: &[u8]) -> IoResult<()> {
+        // Ensure SSL_write will never have 0 bytes write
+        // as it is undefined behavior
+        if buf.len() == 0 { return Ok(())};
+
         // Place writers in line
         let guard = self.writer_sem.access();
 
-        let mut start = 0;
-        while start < buf.len() {
-            let ret = self.in_retry_wrapper(|ssl| {
-                ssl.write(buf.slice_from(start))
-            });
-            match ret {
-                Ok(len) => start += len as uint,
-                Err(SslSessionClosed) => {
-                    return Err(IoError {
-                        kind: io::ConnectionAborted,
-                        desc: "SSL session closed",
-                        detail: None
-                    });
-                },
-                Err(StreamError(e)) => return Err(e),
-                Err(e) => fail!("SSL stream write: {}", e)
-            }
-            try!(self.write_through());
-        }
+        // SSL_write returns only when complete
+        // contents is written, so there is no need
+        // in loop (the only exception is a
+        // SSL_MODE_ENABLE_PARTIAL_WRITE which is not
+        // the case in current impl)
+        let ret = self.in_retry_wrapper(|ssl| {
+            ssl.write(buf)
+        });
+        let res = match ret {
+            Ok(_) => {
+                self.write_through()
+            },
+            Err(SslSessionClosed) => {
+                Err(IoError {
+                    kind: io::ConnectionAborted,
+                    desc: "SSL session closed",
+                    detail: None
+                })
+            },
+            Err(StreamError(e)) => Err(e),
+            Err(e) => fail!("SSL stream write: {}", e)
+        };
+
         drop(guard);
-        Ok(())
+        res
     }
 
     fn flush(&mut self) -> IoResult<()> {
@@ -604,6 +613,8 @@ impl<S: Stream> Writer for SslStream<S> {
 
 impl<S: Stream + Clone> Clone for SslStream<S> {
     // Note: clone should be called only after establishing connection
+    // which is the case in current implementation but may be a problem
+    // in the future
     fn clone(&self) -> SslStream<S> {
         SslStream {
             stream: UnsafeCell::new(self.get_stream().clone()),
