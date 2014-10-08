@@ -552,6 +552,7 @@ impl<S: Stream> Reader for SslStream<S> {
                 }),
             Err(StreamError(e)) => Err(e),
             Err(OpenSslErrors(errs)) => {
+                println!("Errors: {}", errs);
                 Err(IoError {
                     kind: io::OtherIoError,
                     desc: "SSL error",
