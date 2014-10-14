@@ -18,3 +18,6 @@ pub mod crypto;
 mod ffi;
 pub mod ssl;
 pub mod x509;
+
+#[cfg(test)]
+mod utils;
