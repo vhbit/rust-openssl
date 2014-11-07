@@ -465,7 +465,7 @@ impl<S: Stream> SslStream<S> {
                         _ => unreachable!()
                     }
                 },
-                err@_ => fail!("unreachable: {}", err)
+                err@_ => panic!("unreachable: {}", err)
             }
         }
     }
@@ -594,7 +594,7 @@ impl<S: Stream> Writer for SslStream<S> {
                 })
             },
             Err(StreamError(e)) => Err(e),
-            Err(e) => fail!("SSL stream write: {}", e)
+            Err(e) => panic!("SSL stream write: {}", e)
         };
 
         drop(guard);
