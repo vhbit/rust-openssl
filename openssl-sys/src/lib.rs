@@ -253,7 +253,12 @@ pub fn init() {
             SSL_load_error_strings();
 
             let num_locks = CRYPTO_num_locks();
-            let mutexes = Box::new(range(0, num_locks).map(|_| MUTEX_INIT).collect::<Vec<_>>());
+            let mut mutexes = Box::new(Vec::new());
+
+            for _ in 0..num_locks {
+                mutexes.push(MUTEX_INIT);
+            }
+
             MUTEXES = mem::transmute(mutexes);
             let guards: Box<Vec<Option<MutexGuard<()>>>> =
                 Box::new(range(0, num_locks).map(|_| None).collect());
