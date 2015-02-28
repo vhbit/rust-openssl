@@ -187,6 +187,17 @@ fn test_write() {
 }
 
 #[test]
+fn test_write_huge() {
+    use std::iter::repeat;
+
+    let stream = TcpStream::connect("127.0.0.1:15418").unwrap();
+    let mut stream = SslStream::new(&SslContext::new(Sslv23).unwrap(), stream).unwrap();
+    let buf: Vec<u8> = repeat(0u8).take(10 * 1024 * 1024).collect();
+    stream.write_all(buf.as_slice()).unwrap();
+    stream.flush().unwrap();
+}
+
+#[test]
 fn test_read() {
     let stream = TcpStream::connect("127.0.0.1:15418").unwrap();
     let mut stream = SslStream::new(&SslContext::new(Sslv23).unwrap(), stream).unwrap();
