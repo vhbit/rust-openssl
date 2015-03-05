@@ -17,6 +17,7 @@ tlsv1_1 = []
 sslv2 = []
 aes_xts = []
 thread_id = []
+npn = []
 
 [dependencies]
 libc = "0.1"

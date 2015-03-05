@@ -1,4 +1,4 @@
-use libc::{c_int, c_void, c_long};
+use libc::{c_int, c_void, c_long, c_uint, c_char, c_uchar};
 use std::ffi::{CStr, CString};
 use std::cell::{UnsafeCell};
 use std::mem;
@@ -161,6 +161,66 @@ extern fn raw_verify_with_data<T>(preverify_ok: c_int,
     }
 }
 
+#[cfg(feature = "npn")]
+extern "C" fn advertise_next_proto_cb(_ssl: *mut ffi::SSL,
+                              out: *mut *const c_char,
+                              outlen: *mut c_uint,
+                              arg: *mut c_void) -> c_int {
+    unsafe {
+        let ctx: *const SslContext = mem::transmute(arg);
+        if ctx != ptr::null() && (*ctx).next_protos.is_some() {
+            let tmp = (*ctx).next_protos.as_ref().unwrap();
+            *out = mem::transmute(tmp.as_ptr());
+            *outlen = tmp.len() as c_uint;
+            info!("advertising next proto");
+            ffi::SSL_TLSEXT_ERR_OK
+        } else {
+            ffi::SSL_TLSEXT_ERR_ALERT_WARNING
+        }
+    }
+}
+
+#[cfg(feature = "npn")]
+extern "C" fn select_next_proto_cb(_ssl: *mut ffi::SSL, out: *mut *mut c_char,
+                         outlen: *mut c_uchar,
+                         input: *const c_char,
+                         inlen: c_uint, arg: *mut c_void) -> c_int {
+    use std::ptr::PtrExt;
+    use std::slice;
+    use std::str;
+
+    unsafe {
+        let ctx: *const SslContext = mem::transmute(arg);
+        if ctx != ptr::null() && (*ctx).next_protos.is_some() {
+            let tmp = (*ctx).next_protos.as_ref().unwrap();
+            *out = mem::transmute(tmp.as_ptr().offset(1));
+            *outlen = tmp.as_bytes()[0] as u8;
+
+            info!("selecting next proto");
+            let s = slice::from_raw_parts(input, inlen as usize);
+            let proto = str::from_utf8_unchecked(mem::transmute(s));
+            info!("proposed {}", proto);
+            /*
+            let ptr = input;
+            let mut offset =  0 as isize;
+            while offset < inlen as isize {
+                let len = *ptr.offset(offset);
+                let proto_s = ptr.offset(offset+1);
+                let s = slice::from_raw_parts(&proto_s, len as usize);
+                let proto = str::from_utf8_unchecked(mem::transmute(s));
+                info!("\tproto: {}", proto);
+                offset += 1 + len as isize;
+            }
+            */
+
+            ffi::SSL_TLSEXT_ERR_OK
+        } else {
+            ffi::SSL_TLSEXT_ERR_ALERT_WARNING
+        }
+    }
+}
+
+
 /// The signature of functions that can be used to manually verify certificates
 pub type VerifyCallback = fn(preverify_ok: bool,
                              x509_ctx: &X509StoreContext) -> bool;
@@ -183,7 +243,8 @@ fn wrap_ssl_result(res: c_int) -> Option<SslError> {
 
 /// An SSL context object
 pub struct SslContext {
-    ctx: ptr::Unique<ffi::SSL_CTX>
+    ctx: ptr::Unique<ffi::SSL_CTX>,
+    next_protos: Option<String>,
 }
 
 // TODO: add useful info here
@@ -209,7 +270,10 @@ impl SslContext {
             return Err(SslError::get());
         }
 
-        Ok(SslContext { ctx: unsafe {ptr::Unique::new(ctx)} })
+        Ok(SslContext {
+            ctx: unsafe {ptr::Unique::new(ctx)},
+            next_protos: None
+        })
     }
 
     /// Configures the certificate verification method for new connections.
@@ -286,6 +350,22 @@ impl SslContext {
                 let cipher_list = CString::new(cipher_list.as_bytes()).unwrap();
                 ffi::SSL_CTX_set_cipher_list(*self.ctx, cipher_list.as_ptr())
             })
+    }
+
+    #[cfg(feature = "npn")]
+    pub fn set_next_protos(&mut self, protos: &[&'static str]) {
+        if protos.len() > 0 {
+            let mut s = String::new();
+            for proto in protos.iter() {
+                s.push((proto.len() as u8) as char);
+                s.push_str(proto)
+            }
+            self.next_protos = Some(s);
+            unsafe {
+                ffi::SSL_CTX_set_next_protos_advertised_cb((*self.ctx), advertise_next_proto_cb, mem::transmute(self as *mut SslContext));
+                ffi::SSL_CTX_set_next_proto_select_cb(*self.ctx, select_next_proto_cb, mem::transmute(self as *mut SslContext));
+            }
+        }
     }
 }
 
@@ -391,7 +471,7 @@ impl Ssl {
         match FromPrimitive::from_int(err as isize) {
             Some(err) => err,
             None => unreachable!()
-        }        
+        }
     }
 
     /// Set the host name to be used with SNI (Server Name Indication).
@@ -426,6 +506,23 @@ impl Ssl {
         }
     }
 
+    #[cfg(feature = "npn")]
+    pub fn get_negotiated_proto<'a>(&'a self) -> Option<&'a str> {
+        use std::{str, slice};
+
+        unsafe {
+            let mut data = ptr::null();
+            let mut len = 0;
+
+            ffi::SSL_get0_next_proto_negotiated(*self.ssl, &mut data, &mut len);
+            if data == ptr::null() || len == 0 {
+                None
+            } else {
+                let data = slice::from_raw_parts(mem::transmute(data), len as usize);
+                str::from_utf8(data).ok()
+            }
+        }
+    }
 }
 
 #[derive(FromPrimitive, Debug)]
@@ -522,6 +619,10 @@ impl<S: Read+Write> SslStream<S> {
 
     pub fn get(&self) -> &S {
         unsafe {mem::transmute(self.stream.get())}
+    }
+
+    pub fn get_ssl<'a>(&'a self) -> &'a Ssl {
+        &*self.ssl
     }
 
     fn in_retry_wrapper<F>(&self, mut blk: F)

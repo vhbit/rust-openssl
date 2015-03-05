@@ -3,6 +3,10 @@
 #![doc(html_root_url="https://sfackler.github.io/rust-openssl/doc/openssl")]
 
 extern crate libc;
+
+#[macro_use]
+extern crate log;
+
 #[cfg(test)]
 extern crate "rustc-serialize" as serialize;
 

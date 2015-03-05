@@ -108,6 +108,19 @@ pub type PasswordCallback = extern "C" fn(buf: *mut c_char, size: c_int,
                                           rwflag: c_int, user_data: *mut c_void)
                                           -> c_int;
 
+#[cfg(feature = "npn")]
+pub type NextProtoAdvertisedCallback = extern "C" fn(ssl: *mut SSL,
+                              out: *mut *const c_char,
+                              outlen: *mut c_uint,
+                              arg: *mut c_void) -> c_int;
+
+#[cfg(feature = "npn")]
+pub type NextProtoSelectCallback = extern "C" fn(ssl: *mut SSL, out: *mut *mut c_char,
+                         outlen: *mut c_uchar,
+                         input: *const c_char,
+                         inlen: c_uint, arg: *mut c_void) -> c_int;
+
+
 pub const BIO_CTRL_EOF: c_int = 2;
 
 pub const CRYPTO_LOCK: c_int = 1;
@@ -131,6 +144,10 @@ pub const SSL_ERROR_WANT_READ: c_int = 2;
 pub const SSL_ERROR_WANT_WRITE: c_int = 3;
 pub const SSL_ERROR_WANT_X509_LOOKUP: c_int = 4;
 pub const SSL_ERROR_ZERO_RETURN: c_int = 6;
+pub const SSL_TLSEXT_ERR_OK: c_int = 0;
+pub const SSL_TLSEXT_ERR_ALERT_WARNING: c_int = 1;
+pub const SSL_TLSEXT_ERR_ALERT_FATAL: c_int = 2;
+pub const SSL_TLSEXT_ERR_NOACK: c_int = 3;
 pub const SSL_VERIFY_NONE: c_int = 0;
 pub const SSL_VERIFY_PEER: c_int = 1;
 
@@ -496,6 +513,9 @@ extern "C" {
 
     pub fn SSL_COMP_get_name(comp: *const COMP_METHOD) -> *const c_char;
 
+    #[cfg(feature = "npn")]
+    pub fn SSL_get0_next_proto_negotiated(ssl: *const SSL, data: *mut *const c_char, len: *mut c_uint);
+
     pub fn SSL_CTX_new(method: *const SSL_METHOD) -> *mut SSL_CTX;
     pub fn SSL_CTX_free(ctx: *mut SSL_CTX);
     pub fn SSL_CTX_set_verify(ctx: *mut SSL_CTX, mode: c_int,
@@ -516,6 +536,12 @@ extern "C" {
     pub fn SSL_CTX_use_PrivateKey_file(ctx: *mut SSL_CTX, key_file: *const c_char, file_type: c_int) -> c_int;
 
     pub fn SSL_CTX_set_cipher_list(ssl: *mut SSL_CTX, s: *const c_char) -> c_int;
+
+    #[cfg(feature = "npn")]
+    pub fn SSL_CTX_set_next_protos_advertised_cb(ctx: *mut SSL_CTX, cb: NextProtoAdvertisedCallback, arg: *mut c_void);
+    #[cfg(feature = "npn")]
+    pub fn SSL_CTX_set_next_proto_select_cb(ctx: *mut SSL_CTX, cb: NextProtoSelectCallback, arg: *mut c_void);
+
 
     pub fn X509_add_ext(x: *mut X509, ext: *mut X509_EXTENSION, loc: c_int) -> c_int;
     pub fn X509_digest(x: *mut X509, digest: *const EVP_MD, buf: *mut c_char, len: *mut c_uint) -> c_int;
