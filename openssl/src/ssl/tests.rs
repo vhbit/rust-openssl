@@ -12,7 +12,7 @@ use crypto::hash::Type::{SHA256};
 use ssl;
 use ssl::SslMethod;
 use ssl::SslMethod::Sslv23;
-use ssl::{SslContext, SslStream, VerifyCallback};
+use ssl::{SslContext, SslStream, VerifyCallback, SocketSsl};
 use ssl::SSL_VERIFY_PEER;
 use x509::X509StoreContext;
 use x509::X509FileType;
@@ -359,7 +359,7 @@ fn test_pending() {
     let pending = stream.pending();
     let len = stream.read(&mut buf[1..]).unwrap();
     assert_eq!(pending, len);
-} 
+}
 
 /// Tests that connecting with the client using NPN, but the server not does not
 /// break the existing connection behavior.
@@ -505,4 +505,34 @@ fn test_read_dtlsv1() {
     let mut stream = SslStream::new(&SslContext::new(Dtlsv1).unwrap(), stream).unwrap();
     let mut buf = [0u8;100];
     assert!(stream.read(&mut buf).is_ok());
+}
+
+#[test]
+fn test_write_socket() {
+    let stream = TcpStream::connect("127.0.0.1:15418").unwrap();
+
+    let ctx = SslContext::new(Sslv23).unwrap();
+    ctx.set_auto_retry(true);
+
+    let mut ssl = SocketSsl::new(&ctx, &stream).unwrap();
+    ssl.connect().unwrap();
+
+    ssl.write_all("hello".as_bytes()).unwrap();
+    ssl.flush().unwrap();
+    ssl.write_all(" there".as_bytes()).unwrap();
+    ssl.flush().unwrap();
+}
+
+#[test]
+fn test_read_socket() {
+    let stream = TcpStream::connect("127.0.0.1:15418").unwrap();
+    let ctx = SslContext::new(Sslv23).unwrap();
+    ctx.set_auto_retry(true);
+    let mut stream = SocketSsl::new(&ctx, &stream).unwrap();
+    stream.connect().unwrap();
+
+    stream.write_all("GET /\r\n\r\n".as_bytes()).unwrap();
+    stream.flush().unwrap();
+    println!("written");
+    io::copy(&mut stream, &mut io::sink()).ok().expect("read error");
 }

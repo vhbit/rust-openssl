@@ -11,6 +11,7 @@ use std::path::Path;
 use std::ptr;
 use std::sync::{Once, ONCE_INIT, Arc, Mutex};
 use std::ops::{Deref, DerefMut};
+use std::os::unix::io::AsRawFd;
 use std::cmp;
 use std::any::Any;
 #[cfg(feature = "npn")]
@@ -18,7 +19,7 @@ use libc::{c_uchar, c_uint};
 #[cfg(feature = "npn")]
 use std::slice;
 
-use bio::{MemBio};
+use bio::{MemBio, SocketBio};
 use ffi;
 use ssl::error::{SslError, SslSessionClosed, StreamError, OpenSslErrors};
 use x509::{X509StoreContext, X509FileType, X509};
@@ -554,6 +555,18 @@ impl SslContext {
             ffi::SSL_CTX_set_next_protos_advertised_cb(self.ctx, raw_next_protos_advertise_cb, ptr::null_mut());
         }
     }
+
+    pub fn set_auto_retry(&self, on: bool) {
+        unsafe {
+            let mut flags = ffi::SSL_CTX_get_mode(self.ctx);
+            if on {
+                flags |= ffi::SSL_MODE_AUTO_RETRY;
+            } else {
+                flags |= !ffi::SSL_MODE_AUTO_RETRY;
+            }
+            ffi::SSL_CTX_set_mode(self.ctx, flags);
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -758,7 +771,7 @@ pub struct SslStream<S> {
 impl SslStream<net::TcpStream> {
     /// Create a new independently owned handle to the underlying socket.
     pub fn try_clone(&self) -> io::Result<SslStream<net::TcpStream>> {
-        Ok(SslStream { 
+        Ok(SslStream {
             stream: try!(self.stream.try_clone()),
             ssl: self.ssl.clone(),
             buf: self.buf.clone(),
@@ -979,6 +992,209 @@ impl<S> MaybeSslStream<S> where S: Read+Write {
         match *self {
             MaybeSslStream::Ssl(ref mut s) => s.get_mut(),
             MaybeSslStream::Normal(ref mut s) => s,
+        }
+    }
+}
+
+struct SafeSsl(*mut ffi::SSL);
+
+impl Drop for SafeSsl {
+    fn drop(&mut self) {
+        unsafe { ffi::SSL_free(self.0)}
+    }
+}
+
+impl Deref for SafeSsl {
+    type Target = *mut ffi::SSL;
+
+    fn deref<'a>(&'a self) -> &'a *mut ffi::SSL {
+        &self.0
+    }
+}
+
+pub struct SocketSsl {
+    ssl: Arc<SafeSsl>
+}
+
+// TODO: put useful information here
+impl fmt::Debug for SocketSsl {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        write!(fmt, "SocketSSL")
+    }
+}
+
+impl SocketSsl {
+    pub fn new<T: AsRawFd>(ctx: &SslContext, socket: &T) -> Result<SocketSsl, SslError> {
+        let ssl = unsafe { ffi::SSL_new(ctx.ctx) };
+        if ssl == ptr::null_mut() {
+            return Err(SslError::get());
+        }
+
+        let sbio = try!(SocketBio::from_socket(socket));
+
+        let ssl = SocketSsl {
+            ssl: Arc::new(SafeSsl(ssl)),
+        };
+
+        unsafe {
+            let bio = sbio.unwrap();
+            ffi::SSL_set_bio(**ssl.ssl, bio, bio);
+        }
+
+        Ok(ssl)
+    }
+
+    pub fn connect(&self) -> Result<(), SslError> {
+        unsafe {
+            //ffi::ERR_clear_error();
+            let res = ffi::SSL_connect(**self.ssl);
+            lift_ssl_if!(res < 1)
+        }
+    }
+
+    fn accept(&self) -> c_int {
+        unsafe {
+            //ffi::ERR_clear_error();
+            ffi::SSL_accept(**self.ssl)
+        }
+    }
+
+    fn _read(&self, buf: &mut [u8]) -> c_int {
+        let len = cmp::min(c_int::max_value() as usize, buf.len()) as c_int;
+        unsafe {
+            //ffi::ERR_clear_error();
+            ffi::SSL_read(**self.ssl, buf.as_ptr() as *mut c_void,
+                          len as c_int)
+        }
+    }
+
+    fn _write(&self, buf: &[u8]) -> c_int {
+        let len = cmp::min(c_int::max_value() as usize, buf.len()) as c_int;
+        unsafe {
+            //ffi::ERR_clear_error();
+            ffi::SSL_write(**self.ssl, buf.as_ptr() as *const c_void,
+                           len as c_int)
+        }
+    }
+
+    fn get_error(&self, ret: c_int) -> LibSslError {
+        let err = unsafe { ffi::SSL_get_error(**self.ssl, ret) };
+        // FIXME: here should be a failsafe
+        LibSslError::from_i32(err).unwrap()
+    }
+
+    /// Set the host name to be used with SNI (Server Name Indication).
+    pub fn set_hostname(&self, hostname: &str) -> Result<(), SslError> {
+        let ret = unsafe {
+                // This is defined as a macro:
+                //      #define SSL_set_tlsext_host_name(s,name) \
+                //          SSL_ctrl(s,SSL_CTRL_SET_TLSEXT_HOSTNAME,TLSEXT_NAMETYPE_host_name,(char *)name)
+
+                let hostname = CString::new(hostname.as_bytes()).unwrap();
+                ffi::SSL_ctrl(**self.ssl, ffi::SSL_CTRL_SET_TLSEXT_HOSTNAME,
+                              ffi::TLSEXT_NAMETYPE_host_name,
+                              hostname.as_ptr() as *mut c_void)
+        };
+
+        // For this case, 0 indicates failure.
+        if ret == 0 {
+            Err(SslError::get())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn get_peer_certificate(&self) -> Option<X509> {
+        unsafe {
+            let ptr = ffi::SSL_get_peer_certificate(**self.ssl);
+            if ptr.is_null() {
+                None
+            } else {
+                Some(X509::new(ptr, true))
+            }
+        }
+    }
+
+    #[cfg(feature = "npn")]
+    pub fn get_negotiated_proto<'a>(&'a self) -> Option<&'a str> {
+        use std::str;
+        use std::slice;
+
+        unsafe {
+            let mut data = ptr::null();
+            let mut len = 0;
+
+            ffi::SSL_get0_next_proto_negotiated(**self.ssl, &mut data, &mut len);
+            if data == ptr::null() || len == 0 {
+                None
+            } else {
+                let data = slice::from_raw_parts(mem::transmute(data), len as usize);
+                str::from_utf8(data).ok()
+            }
+        }
+    }
+
+    fn to_io_result(&self, ret: c_int, _prefix: &'static str) -> io::Result<usize> {
+        match self.get_error(ret) {
+            LibSslError::ErrorWantRead => {
+                //debug!("want read");
+                Err(io::Error::new(io::ErrorKind::Other, SslError::get()))
+            }
+            LibSslError::ErrorWantWrite => {
+                //debug!("want write");
+                Err(io::Error::new(io::ErrorKind::Other, SslError::get()))
+            }
+            LibSslError::ErrorZeroReturn => { Ok(0) }
+            LibSslError::ErrorSsl => {
+                //debug!("error ssl");
+                Err(io::Error::new(io::ErrorKind::Other, SslError::get()))
+            }
+            LibSslError::ErrorSyscall => {
+                /* According to SSL docs:
+                If ret == 0, an EOF was observed that violates the protocol.
+                If ret == -1, the underlying BIO reported an I/O error
+                 */
+                match ret {
+                    0 => {/*debug!("{} syscall - EOF", prefix); */ Ok(0) },
+                    -1 => {/*debug!("{} syscall - bio error", prefix); */ Ok(0) },
+                    _ => unreachable!()
+                }
+            },
+            err@_ => panic!("unreachable: {:?}", err)
+        }
+    }
+}
+
+impl Read for SocketSsl {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let res = self._read(buf);
+        if res > 0 {
+            Ok(res as usize)
+        } else {
+            self.to_io_result(res, "read failed")
+        }
+    }
+}
+
+impl Write for SocketSsl {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let res = self._write(buf);
+        if res > 0 {
+            Ok(res as usize)
+        } else {
+            self.to_io_result(res, "write failed")
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Clone for SocketSsl {
+    fn clone(&self) -> SocketSsl {
+        SocketSsl {
+            ssl: self.ssl.clone()
         }
     }
 }

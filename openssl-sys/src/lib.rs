@@ -128,13 +128,20 @@ pub const MBSTRING_UTF8: c_int = MBSTRING_FLAG;
 pub const NID_ext_key_usage: c_int = 126;
 pub const NID_key_usage:     c_int = 83;
 
+#[cfg(feature = "npn")]
+pub const OPENSSL_NPN_UNSUPPORTED: c_int = 0;
+#[cfg(feature = "npn")]
+pub const OPENSSL_NPN_NEGOTIATED: c_int = 1;
+#[cfg(feature = "npn")]
+pub const OPENSSL_NPN_NO_OVERLAP: c_int = 2;
+
+pub const SSL_CTRL_EXTRA_CHAIN_CERT: c_int = 14;
 pub const SSL_CTRL_OPTIONS: c_int = 32;
+pub const SSL_CTRL_MODE: c_int = 33;
+pub const SSL_CTRL_SET_READ_AHEAD: c_int = 41;
+pub const SSL_CTRL_SET_TLSEXT_HOSTNAME: c_int = 55;
 pub const SSL_CTRL_CLEAR_OPTIONS: c_int = 77;
 
-pub const SSL_CTRL_SET_TLSEXT_HOSTNAME: c_int = 55;
-pub const SSL_CTRL_EXTRA_CHAIN_CERT: c_int = 14;
-
-pub const SSL_CTRL_SET_READ_AHEAD: c_int = 41;
 pub const SSL_ERROR_NONE: c_int = 0;
 pub const SSL_ERROR_SSL: c_int = 1;
 pub const SSL_ERROR_SYSCALL: c_int = 5;
@@ -148,19 +155,17 @@ pub const SSL_VERIFY_NONE: c_int = 0;
 pub const SSL_VERIFY_PEER: c_int = 1;
 pub const SSL_VERIFY_FAIL_IF_NO_PEER_CERT: c_int = 2;
 
-pub const TLSEXT_NAMETYPE_host_name: c_long = 0;
-
 pub const SSL_TLSEXT_ERR_OK: c_int = 0;
 pub const SSL_TLSEXT_ERR_ALERT_WARNING: c_int = 1;
 pub const SSL_TLSEXT_ERR_ALERT_FATAL: c_int = 2;
 pub const SSL_TLSEXT_ERR_NOACK: c_int = 3;
 
-#[cfg(feature = "npn")]
-pub const OPENSSL_NPN_UNSUPPORTED: c_int = 0;
-#[cfg(feature = "npn")]
-pub const OPENSSL_NPN_NEGOTIATED: c_int = 1;
-#[cfg(feature = "npn")]
-pub const OPENSSL_NPN_NO_OVERLAP: c_int = 2;
+pub const SSL_MODE_ENABLE_PARTIAL_WRITE: c_long = 1;
+pub const SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER: c_long = 2;
+pub const SSL_MODE_AUTO_RETRY: c_long = 0x4;
+pub const SSL_MODE_RELEASE_BUFFERS: c_long = 0x10;
+
+pub const TLSEXT_NAMETYPE_host_name: c_long = 0;
 
 pub const V_ASN1_GENERALIZEDTIME: c_int = 24;
 pub const V_ASN1_UTCTIME:         c_int = 23;
@@ -287,6 +292,14 @@ pub unsafe fn SSL_CTX_set_read_ahead(ctx: *mut SSL_CTX, m: c_long) -> c_long {
     SSL_CTX_ctrl(ctx, SSL_CTRL_SET_READ_AHEAD, m, ptr::null_mut())
 }
 
+pub unsafe fn SSL_CTX_set_mode(ctx: *mut SSL_CTX, mode: c_long) -> c_long {
+    SSL_CTX_ctrl(ctx, SSL_CTRL_MODE, mode, ptr::null_mut())
+}
+
+pub unsafe fn SSL_CTX_get_mode(ctx: *mut SSL_CTX) -> c_long {
+    SSL_CTX_ctrl(ctx, SSL_CTRL_MODE, 0, ptr::null_mut())
+}
+
 // True functions
 extern "C" {
     pub fn ASN1_INTEGER_set(dest: *mut ASN1_INTEGER, value: c_long) -> c_int;
@@ -294,11 +307,14 @@ extern "C" {
     pub fn ASN1_TIME_free(tm: *mut ASN1_TIME);
 
     pub fn BIO_ctrl(b: *mut BIO, cmd: c_int, larg: c_long, parg: *mut c_void) -> c_long;
+    pub fn BIO_free(b: *mut BIO);
     pub fn BIO_free_all(b: *mut BIO);
     pub fn BIO_new(type_: *const BIO_METHOD) -> *mut BIO;
     pub fn BIO_read(b: *mut BIO, buf: *mut c_void, len: c_int) -> c_int;
     pub fn BIO_write(b: *mut BIO, buf: *const c_void, len: c_int) -> c_int;
     pub fn BIO_s_mem() -> *const BIO_METHOD;
+    pub fn BIO_s_socket() -> *const BIO_METHOD;
+    pub fn BIO_new_socket(sock: c_int, close_flag: c_int) -> *mut BIO;
 
     pub fn BN_new() -> *mut BIGNUM;
     pub fn BN_dup(n: *mut BIGNUM) -> *mut BIGNUM;
@@ -518,6 +534,10 @@ extern "C" {
 
     pub fn SSL_CTX_new(method: *const SSL_METHOD) -> *mut SSL_CTX;
     pub fn SSL_CTX_free(ctx: *mut SSL_CTX);
+
+    pub fn SSL_CTX_ctrl(ctx: *mut SSL_CTX, cmd: c_int, larg: c_long, parg: *mut c_void) -> c_long;
+
+    pub fn SSL_CTX_set_cipher_list(ssl: *mut SSL_CTX, s: *const c_char) -> c_int;
     pub fn SSL_CTX_set_verify(ctx: *mut SSL_CTX, mode: c_int,
                               verify_callback: Option<extern fn(c_int, *mut X509_STORE_CTX) -> c_int>);
     pub fn SSL_CTX_set_verify_depth(ctx: *mut SSL_CTX, depth: c_int);
@@ -539,9 +559,6 @@ extern "C" {
     pub fn SSL_CTX_use_PrivateKey(ctx: *mut SSL_CTX, key: *mut EVP_PKEY) -> c_int;
     pub fn SSL_CTX_check_private_key(ctx: *mut SSL_CTX) -> c_int;
 
-    pub fn SSL_CTX_set_cipher_list(ssl: *mut SSL_CTX, s: *const c_char) -> c_int;
-
-    pub fn SSL_CTX_ctrl(ssl: *mut SSL_CTX, cmd: c_int, larg: c_long, parg: *mut c_void) -> c_long;
     #[cfg(feature = "npn")]
     pub fn SSL_CTX_set_next_protos_advertised_cb(ssl: *mut SSL_CTX,
                                                  cb: extern "C" fn(ssl: *mut SSL,

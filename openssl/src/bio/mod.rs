@@ -3,6 +3,8 @@ use std::io;
 use std::io::prelude::*;
 use std::ptr;
 use std::cmp;
+// use std::num::Int;
+use std::os::unix::io::AsRawFd;
 
 use ffi;
 use ssl::error::{SslError};
@@ -96,5 +98,44 @@ impl Write for MemBio {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+pub struct SocketBio {
+    bio: *mut ffi::BIO,
+}
+
+impl Drop for SocketBio {
+    fn drop(&mut self) {
+        if self.bio != ptr::null_mut() {
+            unsafe {
+                ffi::BIO_free(self.bio);
+            }
+        }
+    }
+}
+
+impl SocketBio {
+    /// Creates a new owned memory based BIO
+    pub fn from_socket<T: AsRawFd>(socket: &T) -> Result<SocketBio, SslError> {
+        ffi::init();
+
+        let bio = unsafe { ffi::BIO_new_socket(socket.as_raw_fd(), 0) };
+        try_ssl_null!(bio);
+
+        Ok(SocketBio {
+            bio: bio,
+        })
+    }
+
+    pub unsafe fn unwrap(mut self) -> *mut ffi::BIO {
+        let tmp = self.bio;
+        self.bio = ptr::null_mut(); // prevent freeing on drop
+        tmp
+    }
+
+    /// Temporarily gets wrapped value
+    pub unsafe fn get_handle(&self) -> *mut ffi::BIO {
+        self.bio
     }
 }
