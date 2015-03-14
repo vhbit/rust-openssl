@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crypto::hash::Type::{SHA256};
 use ssl::SslMethod::Sslv23;
-use ssl::{SslContext, SslStream, VerifyCallback};
+use ssl::{SslContext, SslStream, VerifyCallback, SocketSsl};
 use ssl::SslVerifyMode::SslVerifyPeer;
 use x509::{X509StoreContext};
 
@@ -201,6 +201,36 @@ fn test_write_huge() {
 fn test_read() {
     let stream = TcpStream::connect("127.0.0.1:15418").unwrap();
     let mut stream = SslStream::new(&SslContext::new(Sslv23).unwrap(), stream).unwrap();
+    stream.write_all("GET /\r\n\r\n".as_bytes()).unwrap();
+    stream.flush().unwrap();
+    println!("written");
+    io::copy(&mut stream, &mut io::sink()).ok().expect("read error");
+}
+
+#[test]
+fn test_write_socket() {
+    let stream = TcpStream::connect("127.0.0.1:15418").unwrap();
+
+    let ctx = SslContext::new(Sslv23).unwrap();
+    ctx.set_auto_retry(true);
+
+    let mut ssl = SocketSsl::new(&ctx, &stream).unwrap();
+    ssl.connect().unwrap();
+
+    ssl.write_all("hello".as_bytes()).unwrap();
+    ssl.flush().unwrap();
+    ssl.write_all(" there".as_bytes()).unwrap();
+    ssl.flush().unwrap();
+}
+
+#[test]
+fn test_read_socket() {
+    let stream = TcpStream::connect("127.0.0.1:15418").unwrap();
+    let ctx = SslContext::new(Sslv23).unwrap();
+    ctx.set_auto_retry(true);
+    let mut stream = SocketSsl::new(&ctx, &stream).unwrap();
+    stream.connect().unwrap();
+
     stream.write_all("GET /\r\n\r\n".as_bytes()).unwrap();
     stream.flush().unwrap();
     println!("written");
