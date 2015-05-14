@@ -1012,6 +1012,10 @@ impl Deref for SafeSsl {
     }
 }
 
+unsafe impl Sync for SafeSsl {}
+
+unsafe impl Send for SafeSsl {}
+
 pub struct SocketSsl {
     ssl: Arc<SafeSsl>
 }
