@@ -457,10 +457,13 @@ extern "C" {
 
     // Pre-1.0 versions of these didn't return anything, so the shims bridge that gap
     #[cfg_attr(target_os = "nacl", link_name = "HMAC_Init_ex")]
+    #[cfg_attr(target_os = "ios", link_name = "HMAC_Init_ex")]
     pub fn HMAC_Init_ex_shim(ctx: *mut HMAC_CTX, key: *const u8, keylen: c_int, md: *const EVP_MD, imple: *const ENGINE) -> c_int;
     #[cfg_attr(target_os = "nacl", link_name = "HMAC_Final")]
+    #[cfg_attr(target_os = "ios", link_name = "HMAC_Final")]
     pub fn HMAC_Final_shim(ctx: *mut HMAC_CTX, output: *mut u8, len: *mut c_uint) -> c_int;
     #[cfg_attr(target_os = "nacl", link_name = "HMAC_Update")]
+    #[cfg_attr(target_os = "ios", link_name = "HMAC_Update")]
     pub fn HMAC_Update_shim(ctx: *mut HMAC_CTX, input: *const u8, len: c_uint) -> c_int;
 
 
