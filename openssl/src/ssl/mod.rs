@@ -1056,10 +1056,11 @@ impl SocketSsl {
         }
     }
 
-    fn accept(&self) -> c_int {
+    pub fn accept(&self) -> Result<(), SslError> {
         unsafe {
             //ffi::ERR_clear_error();
-            ffi::SSL_accept(**self.ssl)
+            let res = ffi::SSL_accept(**self.ssl);
+            lift_ssl_if!(res < 1)
         }
     }
 
