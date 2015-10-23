@@ -430,6 +430,13 @@ impl SslContext {
         }
     }
 
+    pub fn set_ecdh_auto(&mut self, onoff: bool) -> Result<(),SslError> {
+        wrap_ssl_result(
+            unsafe {
+                ffi::SSL_CTX_set_ecdh_auto(self.ctx, onoff as c_long) as i32
+            })
+    }
+
     #[allow(non_snake_case)]
     /// Specifies the file that contains trusted CA certificates.
     pub fn set_CA_file<P: AsRef<Path>>(&mut self, file: P) -> Result<(),SslError> {

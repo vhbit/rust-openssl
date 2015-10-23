@@ -140,6 +140,7 @@ pub const SSL_CTRL_OPTIONS: c_int = 32;
 pub const SSL_CTRL_MODE: c_int = 33;
 pub const SSL_CTRL_SET_READ_AHEAD: c_int = 41;
 pub const SSL_CTRL_SET_TLSEXT_HOSTNAME: c_int = 55;
+pub const SSL_CTRL_SET_ECDH_AUTO: c_int = 94;
 pub const SSL_CTRL_CLEAR_OPTIONS: c_int = 77;
 
 pub const SSL_ERROR_NONE: c_int = 0;
@@ -298,6 +299,10 @@ pub unsafe fn SSL_CTX_set_mode(ctx: *mut SSL_CTX, mode: c_long) -> c_long {
 
 pub unsafe fn SSL_CTX_get_mode(ctx: *mut SSL_CTX) -> c_long {
     SSL_CTX_ctrl(ctx, SSL_CTRL_MODE, 0, ptr::null_mut())
+}
+
+pub unsafe fn SSL_CTX_set_ecdh_auto(ctx: *mut SSL_CTX, on_off: c_long) -> c_long {
+    SSL_CTX_ctrl(ctx, SSL_CTRL_SET_ECDH_AUTO, on_off, ptr::null_mut())
 }
 
 // True functions
